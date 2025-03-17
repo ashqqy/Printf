@@ -5,7 +5,6 @@ buffer resb BUF_LEN
 
 section .data
 
-; jump_table dq case_0, case_1, case_2
 
 section .text
 
@@ -29,19 +28,22 @@ global asm_exit
 ; Input: rax - format ptr with offset to current byte
 ;        rdi - buffer ptr with offset
 ;----------------------------------------------------
-printf_from_format:
+%macro printf_from_format 0
     push rax
     mov rax, [rax]
     stosb
     pop rax
-    ret
+%endmacro
 
 ;----------------------------------------------------
-; Input: 
+; Input: rbp - stack ptr to currect arg
+;        rdi - buffer ptr with offset
+; Destr: rsi
 ;----------------------------------------------------
-printf_char:
+%macro printf_char 0
+    mov rsi, rbp
     movsb
-    ret
+%endmacro
 
 ;----------------------------------------------------
 ;
@@ -53,6 +55,7 @@ printf_char:
 printf_main:
     mov rbp, rsp
     add rbp, 8              ; skip ret ptr printf_main func
+;                           ;   rbp point to 1st arg in stack
 
     mov rdi, buffer
 
@@ -64,21 +67,50 @@ printf_main:
 
     cmp [rax], byte '%'
     je .special_printf
-    jmp .default_printf
+    jmp .common_printf
+
+.common_printf:
+    printf_from_format
+    jmp .next_iter
 
 .special_printf:
     inc rax
-    cmp [rax], byte 'c'
-    je .printf_byte
+    cmp [rax], byte 'a'
+    jl .printf_other
+    cmp [rax], byte 'x'
+    jg .printf_other
+    movzx rbx, byte [rax]
+    sub rbx, 'a'
+    jmp [.jump_table + rbx * 8h]
 
-.printf_byte:
-    mov rsi, rbp
-    call printf_char
+    .jump_table:
+;                           ; unused ascii <'a'
+    dq .printf_other         ; unused 'a'
+    ; dq .printf_bin          ; 'b'
+    dq .printf_other
+    dq .printf_c             ; 'c'
+    ; dq .printf_dec          ; 'd'
+    dq .printf_other
+    dq .printf_other              ; unused 'e'
+    ; dq .printf_float        ; 'f'
+    dq .printf_other
+    times 8 dq .printf_other ; unused 'g' - 'p'
+    ; dq .printf_oct          ; 'o'
+    dq .printf_other
+    times 3 dq .printf_other ; unused 'p' - 'r'
+    ; dq .printf_str          ; 's'
+    dq .printf_other
+    times 4 dq .printf_other ; unused 't' - 'w'
+    ; dq .printf_hex          ; 'x'
+    dq .printf_other
+;                           ; unused ascii >'x'
+    
+.printf_c:
+    printf_char
     jmp .shift_stack
 
-.default_printf:
-    call printf_from_format
-    jmp .next_iter
+.printf_other:
+    jmp .end_printf
 
 .shift_stack:
     add rbp, 8
@@ -90,7 +122,7 @@ printf_main:
     sub rdx, buffer         ; rdx = buffer len
     mov rdi, 1              ; stdout
     mov rsi, buffer         
-    syscall
+    safe_syscall
     ret
 
 ;----------------------------------------------------
