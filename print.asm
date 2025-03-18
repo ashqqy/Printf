@@ -5,6 +5,8 @@ buffer resb BUF_LEN
 
 section .data
 
+error_msg db "ERROR: Incorrect format", 10  ; '\n' = 10
+ERROR_MSG_LEN equ $ - error_msg
 
 section .text
 
@@ -38,12 +40,73 @@ global asm_exit
 ;----------------------------------------------------
 ; Input: rbp - stack ptr to currect arg
 ;        rdi - buffer ptr with offset
-; Destr: rsi
+; Destr: rsi, rdi
 ;----------------------------------------------------
 %macro printf_char 0
     mov rsi, rbp
     movsb
 %endmacro
+
+;----------------------------------------------------
+; Input: rbp - stack ptr to currect arg
+;        rdi - buffer ptr with offset
+; Destr: rsi, rdi
+;----------------------------------------------------
+printf_str:
+    mov rsi, [rbp]
+
+.next_step:
+    cmp [rsi], byte 0
+    je .end
+    movsb
+    jmp .next_step
+
+.end:
+    ret
+
+;----------------------------------------------------
+; Input: eax - dec int32_t
+;        rdi - buffer ptr with offset
+;
+; Destr: rcx - digits counter, 
+;        ebx - radix,  
+;        edx - mod,
+;        rdi
+;----------------------------------------------------
+printf_dec:
+    xor rcx, rcx
+
+    cmp eax, 0
+    jl .is_neg
+    jmp .next_step
+
+.is_neg:
+    neg eax
+    mov byte [rdi], '-'
+    inc rdi
+
+.next_step:
+    mov ebx, 10
+    xor edx, edx
+    div ebx                 ; eax = edx:eax / ebx
+;                           ; edx = edx:eax % ebx
+    push rdx
+    inc rcx
+    cmp eax, 0
+    je .print_step
+    jmp .next_step
+
+.print_step:
+    cmp rcx, 0
+    je .end
+    pop rax
+    add eax, '0'
+    stosb
+    dec rcx
+    jmp .print_step
+
+.end:
+    ret
 
 ;----------------------------------------------------
 ;
@@ -60,7 +123,7 @@ printf_main:
     mov rdi, buffer
 
     dec rax
-.next_iter:
+.next_step:
     inc rax
     cmp [rax], byte 0
     je .end_printf
@@ -71,7 +134,7 @@ printf_main:
 
 .common_printf:
     printf_from_format
-    jmp .next_iter
+    jmp .next_step
 
 .special_printf:
     inc rax
@@ -84,37 +147,51 @@ printf_main:
     jmp [.jump_table + rbx * 8h]
 
     .jump_table:
-;                           ; unused ascii <'a'
+;                            ; unused ascii <'a'
     dq .printf_other         ; unused 'a'
     ; dq .printf_bin          ; 'b'
     dq .printf_other
     dq .printf_c             ; 'c'
-    ; dq .printf_dec          ; 'd'
-    dq .printf_other
-    dq .printf_other              ; unused 'e'
+    dq .printf_d             ; 'd'
+    dq .printf_other         ; unused 'e'
     ; dq .printf_float        ; 'f'
     dq .printf_other
     times 8 dq .printf_other ; unused 'g' - 'p'
     ; dq .printf_oct          ; 'o'
     dq .printf_other
     times 3 dq .printf_other ; unused 'p' - 'r'
-    ; dq .printf_str          ; 's'
-    dq .printf_other
+    dq .printf_s             ; 's'
     times 4 dq .printf_other ; unused 't' - 'w'
     ; dq .printf_hex          ; 'x'
     dq .printf_other
-;                           ; unused ascii >'x'
+;                            ; unused ascii >'x'
     
 .printf_c:
     printf_char
     jmp .shift_stack
 
+.printf_s:
+    call printf_str
+    jmp .shift_stack
+
+.printf_d:
+    push rax
+    mov eax, [rbp]
+    call printf_dec
+    pop rax
+    jmp .shift_stack
+
 .printf_other:
-    jmp .end_printf
+    mov rax, 1              ; write
+    mov rdi, 1              ; stdout
+    mov rsi, error_msg  
+    sub rdx, ERROR_MSG_LEN
+    safe_syscall
+    ret
 
 .shift_stack:
     add rbp, 8
-    jmp .next_iter
+    jmp .next_step
 
 .end_printf:
     mov rax, 1              ; write
