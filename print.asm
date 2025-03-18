@@ -5,6 +5,8 @@ buffer resb BUF_LEN
 
 section .data
 
+hex_table db "0123456789abcdef"
+
 error_msg db "ERROR: Incorrect format", 10  ; '\n' = 10
 ERROR_MSG_LEN equ $ - error_msg
 
@@ -65,13 +67,13 @@ printf_str:
     ret
 
 ;----------------------------------------------------
-; Input: eax - dec int32_t
+; Input: eax - int32_t
 ;        rdi - buffer ptr with offset
 ;
 ; Destr: rcx - digits counter, 
 ;        ebx - radix,  
 ;        edx - mod,
-;        rdi
+;        rdi - new buffer offset
 ;----------------------------------------------------
 printf_dec:
     xor rcx, rcx
@@ -93,7 +95,6 @@ printf_dec:
     push rdx
     inc rcx
     cmp eax, 0
-    je .print_step
     jmp .next_step
 
 .print_step:
@@ -104,6 +105,46 @@ printf_dec:
     stosb
     dec rcx
     jmp .print_step
+
+.end:
+    ret
+
+;----------------------------------------------------
+; Input: eax - int32_t
+;        rdi - buffer ptr with offset
+;
+; Destr: rcx - digits counter
+;        rdx - ,  
+;        rdi - new buffer offset
+;----------------------------------------------------
+printf_bin:
+    mov rcx, 32d            ; 32d = n bits in number
+    xor rdx, rdx
+
+.skip_zeros:
+    shl eax, 1
+    jc .buffer_write        ; if (cf == 1) jmp
+    loop .skip_zeros
+
+    mov byte [rdi], '0'
+    inc rdi
+    ret
+
+.buffer_write:
+    adc rdx, 0              ; rdx = cf
+    add rdx, '0'
+    mov [rdi], dl
+    inc rdi
+    loop .next_step
+
+.next_step:
+    xor rdx, rdx
+    shl eax, 1
+    adc rdx, 0              ; rdx = cf
+    add rdx, '0'
+    mov [rdi], dl
+    inc rdi
+    loop .next_step
 
 .end:
     ret
@@ -149,12 +190,11 @@ printf_main:
     .jump_table:
 ;                            ; unused ascii <'a'
     dq .printf_other         ; unused 'a'
-    ; dq .printf_bin          ; 'b'
-    dq .printf_other
+    dq .printf_b             ; 'b'
     dq .printf_c             ; 'c'
     dq .printf_d             ; 'd'
     dq .printf_other         ; unused 'e'
-    ; dq .printf_float        ; 'f'
+    ; dq .printf_double        ; 'f'
     dq .printf_other
     times 8 dq .printf_other ; unused 'g' - 'p'
     ; dq .printf_oct          ; 'o'
@@ -178,6 +218,13 @@ printf_main:
     push rax
     mov eax, [rbp]
     call printf_dec
+    pop rax
+    jmp .shift_stack
+
+.printf_b:
+    push rax
+    mov eax, [rbp]
+    call printf_bin
     pop rax
     jmp .shift_stack
 

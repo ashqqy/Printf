@@ -4,9 +4,9 @@ extern void asm_printf (const char* format, ...);
 void _start() 
 {
     char* str = "social credit";
-    int num = -1000;
+    int num = -1;
 
-    asm_printf("%d %s\n", num, str);
+    asm_printf("%b\n", num);
 
     asm_exit(0);
 }
