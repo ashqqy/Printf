@@ -138,6 +138,7 @@ printf_bin:
     mov [rdi], dl
     inc rdi
     loop .next_step
+    ret
 
 .next_step:
     xor rdx, rdx
@@ -159,10 +160,10 @@ printf_bin:
 ;----------------------------------------------------
 printf_oct:
     mov rcx, 11d            ; 11d = n digits in number
-    xor rdx, rdx
 
     mov edx, eax
-    and edx, 11000000000000000000000000000000b
+    rol edx, 2
+    and edx, 0b11
     shl eax, 2
     cmp edx, 0
     jne .buffer_write
@@ -170,7 +171,8 @@ printf_oct:
 
 .skip_zeros:
     mov edx, eax
-    and edx, 11100000000000000000000000000000b
+    rol edx, 3
+    and edx, 0b111
     shl eax, 3
     cmp edx, 0
     jne .buffer_write
@@ -181,27 +183,60 @@ printf_oct:
     ret
 
 .buffer_write:
-    cmp rcx, 11d
-    je .no_skipped_zeros
-    rol edx, 3h
-    jmp .write_first
-
-.no_skipped_zeros:
-    rol edx, 2h
-
-.write_first:
-    add rdx, '0'
+    add edx, '0'
     mov [rdi], dl
     inc rdi
     loop .next_step
-    jmp .end
+    ret
 
 .next_step:
     mov edx, eax
-    and edx, 11100000000000000000000000000000b
+    rol edx, 3
+    and edx, 0b111
     shl eax, 3
-    rol edx, 3d
     add edx, '0'
+    mov [rdi], dl
+    inc rdi
+    loop .next_step
+
+.end:
+    ret
+
+;----------------------------------------------------
+; Input: eax - int32_t
+;        rdi - buffer ptr with offset
+;
+; Destr: 
+;----------------------------------------------------
+printf_hex:
+    mov rcx, 8d            ; 8d = n digits in number
+
+.skip_zeros:
+    mov edx, eax
+    rol edx, 4
+    and edx, 0b1111
+    shl eax, 4
+    cmp edx, 0
+    jne .buffer_write
+    loop .skip_zeros
+
+    mov byte [rdi], '0'
+    inc rdi
+    ret
+
+.buffer_write:
+    mov dl, byte [hex_table + rdx]
+    mov [rdi], dl
+    inc rdi
+    loop .next_step
+    ret
+
+.next_step:
+    mov edx, eax
+    rol edx, 4
+    and edx, 0b1111
+    shl eax, 4
+    mov dl, byte [hex_table + rdx]
     mov [rdi], dl
     inc rdi
     loop .next_step
@@ -254,15 +289,14 @@ printf_main:
     dq .printf_c             ; 'c'
     dq .printf_d             ; 'd'
     dq .printf_other         ; unused 'e'
-    ; dq .printf_double        ; 'f'
+    ; dq .printf_f             ; 'f'
     dq .printf_other
     times 8 dq .printf_other ; unused 'g' - 'p'
     dq .printf_o             ; 'o'
     times 3 dq .printf_other ; unused 'p' - 'r'
     dq .printf_s             ; 's'
     times 4 dq .printf_other ; unused 't' - 'w'
-    ; dq .printf_hex          ; 'x'
-    dq .printf_other
+    dq .printf_x             ; 'x'
 ;                            ; unused ascii >'x'
     
 .printf_c:
@@ -291,6 +325,13 @@ printf_main:
     push rax
     mov eax, [rbp]
     call printf_oct
+    pop rax
+    jmp .shift_stack
+
+.printf_x:
+    push rax
+    mov eax, [rbp]
+    call printf_hex
     pop rax
     jmp .shift_stack
 
