@@ -1,9 +1,13 @@
-section .bss                ; uninitialized data section
+section .bss                    ; uninitialized data section
 
 BUF_LEN equ 128
 buffer resb BUF_LEN
 
-section .data
+section .rodata
+
+BIN_LEN equ 32d
+OCT_LEN equ 11d
+HEX_LEN equ 8d
 
 hex_table db "0123456789abcdef"
 
@@ -16,7 +20,7 @@ global asm_printf
 global asm_exit
 
 ;----------------------------------------------------
-; Saves regs rcx and r11 before syscall
+; Saves regs rcx and r11 before syscall.
 ;----------------------------------------------------
 %macro safe_syscall 0
     push rcx 
@@ -29,8 +33,10 @@ global asm_exit
 %endmacro
 
 ;----------------------------------------------------
-; Input: rax - format ptr with offset to current byte
-;        rdi - buffer ptr with offset
+; Input:  rax - format ptr with offset to current byte,
+;         rdi - buffer ptr with offset.
+;
+; Output: rdi - new buffer offset.
 ;----------------------------------------------------
 %macro printf_from_format 0
     push rax
@@ -40,9 +46,12 @@ global asm_exit
 %endmacro
 
 ;----------------------------------------------------
-; Input: rbp - stack ptr to currect arg
-;        rdi - buffer ptr with offset
-; Destr: rsi, rdi
+; Input:  rbp - stack ptr to currect arg,
+;         rdi - buffer ptr with offset.
+;
+; Destr:  rsi.
+;
+; Output: rdi - new buffer offset.
 ;----------------------------------------------------
 %macro printf_char 0
     mov rsi, rbp
@@ -50,9 +59,12 @@ global asm_exit
 %endmacro
 
 ;----------------------------------------------------
-; Input: rbp - stack ptr to currect arg
-;        rdi - buffer ptr with offset
-; Destr: rsi, rdi
+; Input:  rbp - stack ptr to currect arg,
+;         rdi - buffer ptr with offset.
+;
+; Destr:  rsi.
+;
+; Output: rdi - new buffer offset.
 ;----------------------------------------------------
 printf_str:
     mov rsi, [rbp]
@@ -67,14 +79,15 @@ printf_str:
     ret
 
 ;----------------------------------------------------
-; Input: eax - int32_t
-;        rdi - buffer ptr with offset
+; Input:  eax - int32_t,
+;         rdi - buffer ptr with offset.
 ;
-; Destr: eax
-;        rcx - digits counter, 
-;        ebx - radix,  
-;        edx - mod,
-;        rdi - new buffer offset
+; Destr:  eax,
+;         rcx - digits counter, 
+;         ebx - radix,  
+;         edx - mod.
+;
+; Output: rdi - new buffer offset.
 ;----------------------------------------------------
 printf_dec:
     xor rcx, rcx
@@ -88,17 +101,18 @@ printf_dec:
     mov byte [rdi], '-'
     inc rdi
 
-.next_step:
+.next_step:                     ; push digits on stack
     mov ebx, 10
     xor edx, edx
-    div ebx                 ; eax = edx:eax / ebx
-;                           ; edx = edx:eax % ebx
+    div ebx                     ; eax = edx:eax / ebx
+;                               ; edx = edx:eax % ebx
     push rdx
     inc rcx
     cmp eax, 0
+    je .print_step
     jmp .next_step
 
-.print_step:
+.print_step:                    ; pop digits and move to buffer
     cmp rcx, 0
     je .end
     pop rax
@@ -111,40 +125,42 @@ printf_dec:
     ret
 
 ;----------------------------------------------------
-; Input: eax - int32_t
-;        rdi - buffer ptr with offset
+; Input:  eax - int32_t,
+;         rdi - buffer ptr with offset.
 ;
-; Destr: eax
-;        rcx - digits counter
-;        rdx - digit ascii code,  
-;        rdi - new buffer offset
+; Destr:  eax,
+;         rcx - digits counter,
+;         dl  - digit ascii code.
+
+; Output: rdi - new buffer offset.
 ;----------------------------------------------------
 printf_bin:
-    mov rcx, 32d            ; 32d = n bits in number
-    xor rdx, rdx
+    mov rcx, BIN_LEN
+    xor dl, dl
 
 .skip_zeros:
-    shl eax, 1
-    jc .buffer_write        ; if (cf == 1) jmp
+    shl eax, 1                  ; if (most significant bit eax = 1) cf = 1
+;                               ;  else cf = 0
+    jc .buffer_write            ; if (cf == 1) jmp
     loop .skip_zeros
 
-    mov byte [rdi], '0'
+    mov byte [rdi], '0'         ; if (all bits == 0) buffer[rdi++] = '0'
     inc rdi
     ret
 
 .buffer_write:
-    adc rdx, 0              ; rdx = cf
-    add rdx, '0'
-    mov [rdi], dl
+    adc dl, 0                   ; dl = cf
+    add dl, '0'                 ; dl = '0' or dl = '1'
+    mov [rdi], dl               ; buffer[rdi++] = dl
     inc rdi
     loop .next_step
     ret
 
 .next_step:
-    xor rdx, rdx
+    xor dl, dl
     shl eax, 1
-    adc rdx, 0              ; rdx = cf
-    add rdx, '0'
+    adc dl, 0
+    add dl, '0'
     mov [rdi], dl
     inc rdi
     loop .next_step
@@ -153,32 +169,37 @@ printf_bin:
     ret
 
 ;----------------------------------------------------
-; Input: eax - int32_t
-;        rdi - buffer ptr with offset
+; Input:  eax - int32_t,
+;         rdi - buffer ptr with offset.
 ;
-; Destr: 
+; Destr:  eax,
+;         rcx - digits counter,
+;         rdx - digit ascii code.
+;
+; Output: rdi - new buffer offset.
 ;----------------------------------------------------
 printf_oct:
-    mov rcx, 11d            ; 11d = n digits in number
+    mov rcx, OCT_LEN
 
-    mov edx, eax
-    rol edx, 2
-    and edx, 0b11
-    shl eax, 2
-    cmp edx, 0
+.first_oct_digit:               ; process first 2 bits apart, because 32 % 3 = 2
+    mov edx, eax                ; EXAMPLE: edx = 0b1110...0000
+    rol edx, 2                  ; edx = 0b10...000011
+    and dl, 0b11                ; edx = 0b00...000011 (first 2 bits of eax in dl)
+    shl eax, 2                  ; delete first 2 bits from eax
+    cmp dl, 0                   ; if (dl == 0) not print this symb
     jne .buffer_write
     loop .skip_zeros
 
 .skip_zeros:
     mov edx, eax
     rol edx, 3
-    and edx, 0b111
-    shl eax, 3
-    cmp edx, 0
+    and dl, 0b111               ; dl = next 3 bits
+    shl eax, 3                  ; delete 3 bits from eax
+    cmp dl, 0
     jne .buffer_write
     loop .skip_zeros
 
-    mov byte [rdi], '0'
+    mov byte [rdi], '0'         ; if (all bits == 0) buffer[rdi++] = '0'
     inc rdi
     ret
 
@@ -192,10 +213,10 @@ printf_oct:
 .next_step:
     mov edx, eax
     rol edx, 3
-    and edx, 0b111
-    shl eax, 3
-    add edx, '0'
-    mov [rdi], dl
+    and dl, 0b111               ; dl = next 3 bits
+    shl eax, 3                  ; delete 3 bits from eax
+    add dl, '0'                 ; dl = ascii of digit
+    mov [rdi], dl               ; buffer[rdi++] = dl
     inc rdi
     loop .next_step
 
@@ -203,24 +224,28 @@ printf_oct:
     ret
 
 ;----------------------------------------------------
-; Input: eax - int32_t
-;        rdi - buffer ptr with offset
+; Input:  eax - int32_t,
+;         rdi - buffer ptr with offset.
 ;
-; Destr: 
+; Destr:  eax,
+;         rcx - digits counter,
+;         rdx - digit ascii code.
+;
+; Output: rdi - new buffer offset.
 ;----------------------------------------------------
 printf_hex:
-    mov rcx, 8d            ; 8d = n digits in number
+    mov rcx, HEX_LEN 
 
 .skip_zeros:
-    mov edx, eax
-    rol edx, 4
-    and edx, 0b1111
-    shl eax, 4
-    cmp edx, 0
+    mov edx, eax 
+    rol edx, 4                      
+    and edx, 0b1111              ; edx = next 4 bits
+    shl eax, 4                   ; delete 4 bits from eax
+    cmp edx, 0                   ; if (edx == 0) not print this symb
     jne .buffer_write
     loop .skip_zeros
 
-    mov byte [rdi], '0'
+    mov byte [rdi], '0'          ; if (all bits == 0) buffer[rdi++] = '0'
     inc rdi
     ret
 
@@ -233,11 +258,11 @@ printf_hex:
 
 .next_step:
     mov edx, eax
-    rol edx, 4
-    and edx, 0b1111
-    shl eax, 4
+    rol edx, 4                  
+    and edx, 0b1111              ; edx = next 4 bits
+    shl eax, 4                   ; delete 4 bits from eax
     mov dl, byte [hex_table + rdx]
-    mov [rdi], dl
+    mov [rdi], dl               ; buffer[rdi++] = *(hex_table + edx)
     inc rdi
     loop .next_step
 
@@ -245,23 +270,24 @@ printf_hex:
     ret
 
 ;----------------------------------------------------
+; Main printf function. Parces format and output string.
 ;
 ; Input: rax - format ptr,
-;        stack - other arguments
+;        stack - other arguments.
 ;
-; Destr: 
+; Destr: rax, rbx, rcx, rdx, rdi, rsi, rbp
 ;----------------------------------------------------
 printf_main:
     mov rbp, rsp
-    add rbp, 8              ; skip ret ptr printf_main func
-;                           ;   rbp point to 1st arg in stack
+    add rbp, 8                  ; skip ret ptr printf_main func
+;                               ;   rbp point to 1st arg in stack
 
     mov rdi, buffer
 
     dec rax
-.next_step:
+.parce:                         ; parce format string
     inc rax
-    cmp [rax], byte 0
+    cmp [rax], byte 0           ; while ([rax] != '\0') parce
     je .end_printf
 
     cmp [rax], byte '%'
@@ -270,7 +296,7 @@ printf_main:
 
 .common_printf:
     printf_from_format
-    jmp .next_step
+    jmp .parce
 
 .special_printf:
     inc rax
@@ -282,76 +308,82 @@ printf_main:
     sub rbx, 'a'
     jmp [.jump_table + rbx * 8h]
 
-    .jump_table:
-;                            ; unused ascii <'a'
-    dq .printf_other         ; unused 'a'
-    dq .printf_b             ; 'b'
-    dq .printf_c             ; 'c'
-    dq .printf_d             ; 'd'
-    dq .printf_other         ; unused 'e'
-    ; dq .printf_f             ; 'f'
-    dq .printf_other
-    times 8 dq .printf_other ; unused 'g' - 'p'
-    dq .printf_o             ; 'o'
-    times 3 dq .printf_other ; unused 'p' - 'r'
-    dq .printf_s             ; 's'
-    times 4 dq .printf_other ; unused 't' - 'w'
-    dq .printf_x             ; 'x'
-;                            ; unused ascii >'x'
+.jump_table:
+;                                           ; unused ascii <'a'
+    dq .printf_other                        ; unused 'a'
+    dq .printf_b                            ; 'b'
+    dq .printf_c                            ; 'c'
+    dq .printf_d                            ; 'd'
+    dq .printf_other                        ; unused 'e'
+    dq .printf_other                        ; unused 'f'
+    times 'n' - 'g' + 1 dq .printf_other    ; unused 'g' - 'n'
+    dq .printf_o                            ; 'o'
+    times 'r' - 'p' + 1 dq .printf_other    ; unused 'p' - 'r'
+    dq .printf_s                            ; 's'
+    times 'w' - 't' + 1 dq .printf_other    ; unused 't' - 'w'
+    dq .printf_x                            ; 'x'
+;                                           ; unused ascii >'x'
     
 .printf_c:
     printf_char
-    jmp .shift_stack
+    jmp .shift_param
 
 .printf_s:
     call printf_str
-    jmp .shift_stack
+    jmp .shift_param
 
 .printf_d:
     push rax
     mov eax, [rbp]
     call printf_dec
     pop rax
-    jmp .shift_stack
+    jmp .shift_param
 
 .printf_b:
     push rax
     mov eax, [rbp]
     call printf_bin
     pop rax
-    jmp .shift_stack
+    jmp .shift_param
 
 .printf_o:
     push rax
     mov eax, [rbp]
     call printf_oct
     pop rax
-    jmp .shift_stack
+    jmp .shift_param
 
 .printf_x:
     push rax
     mov eax, [rbp]
     call printf_hex
     pop rax
-    jmp .shift_stack
+    jmp .shift_param
+
 
 .printf_other:
-    mov rax, 1              ; write
-    mov rdi, 1              ; stdout
-    mov rsi, error_msg  
+    cmp [rax], byte '%'
+    jne .printf_error
+    printf_from_format
+    jmp .parce
+
+.printf_error:
+    mov rax, 1                  ; write
+    mov rdi, 1                  ; stdout
+    mov rsi, error_msg          ; msg about incorrect specifier
     sub rdx, ERROR_MSG_LEN
     safe_syscall
     ret
 
-.shift_stack:
+.shift_param:
     add rbp, 8
-    jmp .next_step
+    jmp .parce
 
 .end_printf:
-    mov rax, 1              ; write
-    mov rdx, rdi            ; rdi - curr buffer ptr (with offset)
-    sub rdx, buffer         ; rdx = buffer len
-    mov rdi, 1              ; stdout
+    mov rax, 1                  ; write
+    mov rdx, rdi                ; rdi - curr buffer ptr (with offset)
+    sub rdx, buffer             ; rdx = buffer len
+    mov rdi, 1                  ; stdout
     mov rsi, buffer         
     safe_syscall
     ret
@@ -361,12 +393,12 @@ printf_main:
 ;   and calls main printf function.
 ;
 ; Input: rdi - 1st arg (format),
-;        rsi, rdx, rcx, r8, r9, stack - other arguments
+;        rsi, rdx, rcx, r8, r9, stack - other arguments.
 ;
-; Destr: r10
+; Destr: r10 - return address.
 ;----------------------------------------------------
 asm_printf:
-    pop r10                 ; save return address
+    pop r10                     ; save return address
 
     push r9 
     push r8 
@@ -374,7 +406,7 @@ asm_printf:
     push rdx 
     push rsi
 
-    mov rax, rdi            ; rax = format
+    mov rax, rdi                ; rax = format
 
     call printf_main
 
@@ -384,7 +416,7 @@ asm_printf:
     pop r8 
     pop r9
 
-    push r10                ; return return address :)
+    push r10                    ; return return address :)
     ret
 
 ;----------------------------------------------------
