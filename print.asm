@@ -5,9 +5,11 @@ buffer resb BUF_LEN
 
 section .rodata
 
-BIN_LEN equ 32d
-OCT_LEN equ 11d
-HEX_LEN equ 8d
+LEN_DEC_INT32  equ 11d       ; 10 bytes of ascii number + 1 byte sign
+LEN_BIN_UINT32 equ 32d       ; 32 bytes of ascii number
+LEN_OCT_UINT32 equ 11d       ; 11 bytes of ascii number
+LEN_HEX_UINT32 equ 8d        ; 8 bytes  of ascii number
+LEN_CHAR       equ 1d
 
 hex_table db "0123456789abcdef"
 
@@ -32,13 +34,94 @@ global asm_exit
     pop rcx
 %endmacro
 
+
+;----------------------------------------------------
+; Input:  %1 - string ptr.
+;
+; Output: rcx - strlen.
+;----------------------------------------------------
+%macro count_strlen 1
+    push rdi
+    push rax
+
+    mov rdi, %1          ; string ptr
+    xor rcx, rcx
+    not rcx              ; cx = max_value
+    xor al, al           ; al = '\0'
+    repne scasb          ; while (symb != \0) cx-=1
+    not ecx
+    dec ecx              ; remove '\0'
+
+    pop rax
+    pop rdi
+%endmacro
+
+;----------------------------------------------------
+; Input: rdi - curr buffer ptr (with offset)
+;----------------------------------------------------
+%macro out_buffer 0
+    mov rax, 1                  ; write
+    mov rdx, rdi                ; rdi - curr buffer ptr (with offset)
+    sub rdx, buffer             ; rdx = buffer len
+    mov rdi, 1                  ; stdout
+    mov rsi, buffer         
+    safe_syscall
+%endmacro
+
+;----------------------------------------------------
+; Input:  1st arg - required space
+;         rsi - string ptr (if macro called from printf_str)
+;
+; Output: rdi - new buffer ptr
+;
+; Destr:  rcx, rdx
+;----------------------------------------------------
+%macro check_buf 1
+    mov rcx, %1
+
+    mov rdx, buffer + BUF_LEN       
+    sub rdx, rdi                    ; rdi - curr buffer ptr (with offset)
+    inc rdx                         ; rdx = free space
+
+    cmp rdx, rcx                    ; if (free space >= required space)
+    jge %%buf_ok                    ;  return;
+
+    push rax                        ; else
+    push rsi                        ;  printf (buffer)
+    out_buffer                      
+    pop rsi
+    pop rax
+    mov rdi, buffer                 ;  rdi = buffer start
+
+    cmp rcx, BUF_LEN                ; if (required space <= buf_len)
+    jle %%buf_ok                    ;  return;
+
+%%big_str:                          ; else
+    push rax                        ;  syscall; (printf str separately)
+
+    mov rax, 1                      ; write
+    mov rdx, rcx                    ; rdx = buffer len
+    mov rdi, 1                      ; stdout
+    safe_syscall                    ; rsi = string ptr 
+
+    mov rdi, buffer
+    pop rax
+    jmp printf_str.end
+
+%%buf_ok:
+%endmacro
+
 ;----------------------------------------------------
 ; Input:  rax - format ptr with offset to current byte,
 ;         rdi - buffer ptr with offset.
 ;
+; Destr:  rcx, rdx.
+;
 ; Output: rdi - new buffer offset.
 ;----------------------------------------------------
 %macro printf_from_format 0
+    check_buf LEN_CHAR
+
     push rax
     mov rax, [rax]
     stosb
@@ -49,11 +132,13 @@ global asm_exit
 ; Input:  rbp - stack ptr to currect arg,
 ;         rdi - buffer ptr with offset.
 ;
-; Destr:  rsi.
+; Destr:  rcx, rdx, rsi.
 ;
 ; Output: rdi - new buffer offset.
 ;----------------------------------------------------
 %macro printf_char 0
+    check_buf LEN_CHAR
+
     mov rsi, rbp
     movsb
 %endmacro
@@ -62,12 +147,14 @@ global asm_exit
 ; Input:  rbp - stack ptr to currect arg,
 ;         rdi - buffer ptr with offset.
 ;
-; Destr:  rsi.
+; Destr:  rcx, rdx, rsi.
 ;
 ; Output: rdi - new buffer offset.
 ;----------------------------------------------------
 printf_str:
     mov rsi, [rbp]
+    count_strlen rsi             ; rcx = strlen
+    check_buf rcx
 
 .next_step:
     cmp [rsi], byte 0
@@ -83,13 +170,14 @@ printf_str:
 ;         rdi - buffer ptr with offset.
 ;
 ; Destr:  eax,
-;         rcx - digits counter, 
+;         rcx - digits counter + check_buf, 
 ;         ebx - radix,  
-;         edx - mod.
+;         rdx - mod + check_buf.
 ;
 ; Output: rdi - new buffer offset.
 ;----------------------------------------------------
 printf_dec:
+    check_buf LEN_DEC_INT32
     xor rcx, rcx
 
     cmp eax, 0
@@ -125,17 +213,18 @@ printf_dec:
     ret
 
 ;----------------------------------------------------
-; Input:  eax - int32_t,
+; Input:  eax - uint32_t,
 ;         rdi - buffer ptr with offset.
 ;
 ; Destr:  eax,
-;         rcx - digits counter,
-;         dl  - digit ascii code.
+;         rcx - digits counter + check_buf,
+;         rdx - digit ascii code + check_buf.
 
 ; Output: rdi - new buffer offset.
 ;----------------------------------------------------
 printf_bin:
-    mov rcx, BIN_LEN
+    check_buf LEN_BIN_UINT32
+    mov rcx, LEN_BIN_UINT32
     xor dl, dl
 
 .skip_zeros:
@@ -169,17 +258,18 @@ printf_bin:
     ret
 
 ;----------------------------------------------------
-; Input:  eax - int32_t,
+; Input:  eax - uint32_t,
 ;         rdi - buffer ptr with offset.
 ;
 ; Destr:  eax,
-;         rcx - digits counter,
-;         rdx - digit ascii code.
+;         rcx - digits counter + check buf,
+;         rdx - digit ascii code + check_buf.
 ;
 ; Output: rdi - new buffer offset.
 ;----------------------------------------------------
 printf_oct:
-    mov rcx, OCT_LEN
+    check_buf LEN_OCT_UINT32
+    mov rcx, LEN_OCT_UINT32
 
 .first_oct_digit:               ; process first 2 bits apart, because 32 % 3 = 2
     mov edx, eax                ; EXAMPLE: edx = 0b1110...0000
@@ -224,17 +314,18 @@ printf_oct:
     ret
 
 ;----------------------------------------------------
-; Input:  eax - int32_t,
+; Input:  eax - uint32_t,
 ;         rdi - buffer ptr with offset.
 ;
 ; Destr:  eax,
-;         rcx - digits counter,
-;         rdx - digit ascii code.
+;         rcx - digits counter + check_buf,
+;         rdx - digit ascii code + check_buf.
 ;
 ; Output: rdi - new buffer offset.
 ;----------------------------------------------------
 printf_hex:
-    mov rcx, HEX_LEN 
+    check_buf LEN_HEX_UINT32
+    mov rcx, LEN_HEX_UINT32
 
 .skip_zeros:
     mov edx, eax 
@@ -380,12 +471,7 @@ printf_main:
     jmp .parce
 
 .end_printf:
-    mov rax, 1                  ; write
-    mov rdx, rdi                ; rdi - curr buffer ptr (with offset)
-    sub rdx, buffer             ; rdx = buffer len
-    mov rdi, 1                  ; stdout
-    mov rsi, buffer         
-    safe_syscall
+    out_buffer         
     ret
 
 ;----------------------------------------------------
