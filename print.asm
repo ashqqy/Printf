@@ -1,9 +1,10 @@
-section .bss                    ; uninitialized data section
-
-BUF_LEN equ 128
-buffer resb BUF_LEN
-
+; TODO stack frame only bp (bp + di*8 = args) (bp - si = buf)
 section .rodata
+
+; WARNING! 
+; Buffer length cannot be less than 32
+; Buffer length must be divisible by 8
+BUF_LEN equ 32
 
 LEN_DEC_INT32  equ 11d          ; 10 bytes of ascii number + 1 byte sign
 LEN_BIN_UINT32 equ 32d          ; 32 bytes of ascii number
@@ -13,13 +14,12 @@ LEN_CHAR       equ 1d
 
 hex_table db "0123456789abcdef"
 
-error_msg db "ERROR: Incorrect format", 10  ; '\n' = 10
+error_msg db 10, "ERROR: Incorrect format", 10  ; '\n' = 10
 ERROR_MSG_LEN equ $ - error_msg
 
 section .text
 
 global asm_printf
-global asm_exit
 
 ;----------------------------------------------------
 ; Saves regs rcx and r11 before syscall.
@@ -62,10 +62,13 @@ global asm_exit
 %macro out_buffer 0
     mov rax, 1                  ; write
     mov rdx, rdi                ; rdi - curr buffer ptr (with offset)
-    sub rdx, buffer             ; rdx = buffer len
+    sub rdx, r11                ; rdx = buffer len
+    cmp rdx, 0
+    je %%end
     mov rdi, 1                  ; stdout
-    mov rsi, buffer         
+    mov rsi, r11         
     safe_syscall
+%%end:
 %endmacro
 
 ;----------------------------------------------------
@@ -79,9 +82,9 @@ global asm_exit
 %macro check_buf 1
     mov rcx, %1
 
-    mov rdx, buffer + BUF_LEN       
-    sub rdx, rdi                ; rdi - curr buffer ptr (with offset)
-    inc rdx                     ; rdx = free space
+    mov rdx, r11                ; rdi - curr buffer ptr (with offset)   
+    add rdx, BUF_LEN 
+    sub rdx, rdi                ; rdx = free space
 
     cmp rdx, rcx                ; if (free space >= required space)
     jge %%buf_ok                ;  return;
@@ -91,21 +94,23 @@ global asm_exit
     out_buffer                      
     pop rsi
     pop rax
-    mov rdi, buffer             ;  rdi = buffer start
+    mov rdi, r11                ;  rdi = buffer start
 
     cmp rcx, BUF_LEN            ; if (required space <= buf_len)
     jle %%buf_ok                ;  return;
 
 %%big_str:                      ; else
     push rax                    ;  syscall; (printf str separately)
+    push rdi
 
     mov rax, 1                  ; write
-    mov rdx, rcx                ; rdx = buffer len
+    mov rdx, rcx                ; rdx = requiered space
     mov rdi, 1                  ; stdout
     safe_syscall                ; rsi = string ptr 
 
-    mov rdi, buffer
+    pop rdi
     pop rax
+
     jmp printf_str.end
 
 %%buf_ok:
@@ -225,7 +230,7 @@ printf_dec:
 printf_bin:
     check_buf LEN_BIN_UINT32
     mov rcx, LEN_BIN_UINT32
-    xor dl, dl
+    xor rdx, rdx
 
 .skip_zeros:
     shl eax, 1                  ; if (most significant bit eax = 1) cf = 1
@@ -369,12 +374,14 @@ printf_hex:
 ;----------------------------------------------------
 printf_main:
     mov rbp, rsp                ; skip ret ptr printf_main func and saved registers (rbx, rbp)
-    add rbp, 8*3                ;  rbp point to 1st arg in stack
+    add rbp, 8*4                ;  rbp point to 1st arg in stack
+
+    sub rsp, BUF_LEN
+    mov rdi, rsp
+    mov r11, rdi                ; save begin of buffer in r11
 
     mov rax, [rbp]              ; rax = format
     add rbp, 8                  ; rbp = 2nd arg
-
-    mov rdi, buffer
 
     dec rax
 .parce:                         ; parce format string
@@ -463,8 +470,9 @@ printf_main:
     mov rax, 1                  ; write
     mov rdi, 1                  ; stdout
     mov rsi, error_msg          ; msg about incorrect specifier
-    sub rdx, ERROR_MSG_LEN
+    mov rdx, ERROR_MSG_LEN
     safe_syscall
+    add rsp, BUF_LEN
     ret
 
 .shift_param:
@@ -472,6 +480,7 @@ printf_main:
     jmp .parce
 
 .end_printf:
+    add rsp, BUF_LEN
     out_buffer         
     ret
 
@@ -496,11 +505,13 @@ asm_printf:
 
     push rbx                    ; save regs
     push rbp
+    push r11
 
     call printf_main
 
-    pop rbx
+    pop r11
     pop rbp
+    pop rbx
 
     pop rdi
     pop rsi 
