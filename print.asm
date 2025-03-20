@@ -5,10 +5,10 @@ buffer resb BUF_LEN
 
 section .rodata
 
-LEN_DEC_INT32  equ 11d       ; 10 bytes of ascii number + 1 byte sign
-LEN_BIN_UINT32 equ 32d       ; 32 bytes of ascii number
-LEN_OCT_UINT32 equ 11d       ; 11 bytes of ascii number
-LEN_HEX_UINT32 equ 8d        ; 8 bytes  of ascii number
+LEN_DEC_INT32  equ 11d          ; 10 bytes of ascii number + 1 byte sign
+LEN_BIN_UINT32 equ 32d          ; 32 bytes of ascii number
+LEN_OCT_UINT32 equ 11d          ; 11 bytes of ascii number
+LEN_HEX_UINT32 equ 8d           ; 8 bytes  of ascii number
 LEN_CHAR       equ 1d
 
 hex_table db "0123456789abcdef"
@@ -44,13 +44,13 @@ global asm_exit
     push rdi
     push rax
 
-    mov rdi, %1          ; string ptr
-    xor rcx, rcx
-    not rcx              ; cx = max_value
-    xor al, al           ; al = '\0'
-    repne scasb          ; while (symb != \0) cx-=1
-    not ecx
-    dec ecx              ; remove '\0'
+    mov rdi, %1                 ; string ptr
+    xor rcx, rcx        
+    not rcx                     ; cx = max_value
+    xor al, al                  ; al = '\0'
+    repne scasb                 ; while (symb != \0) cx-=1
+    not ecx     
+    dec ecx                     ; remove '\0'
 
     pop rax
     pop rdi
@@ -80,29 +80,29 @@ global asm_exit
     mov rcx, %1
 
     mov rdx, buffer + BUF_LEN       
-    sub rdx, rdi                    ; rdi - curr buffer ptr (with offset)
-    inc rdx                         ; rdx = free space
+    sub rdx, rdi                ; rdi - curr buffer ptr (with offset)
+    inc rdx                     ; rdx = free space
 
-    cmp rdx, rcx                    ; if (free space >= required space)
-    jge %%buf_ok                    ;  return;
+    cmp rdx, rcx                ; if (free space >= required space)
+    jge %%buf_ok                ;  return;
 
-    push rax                        ; else
-    push rsi                        ;  printf (buffer)
+    push rax                    ; else
+    push rsi                    ;  printf (buffer)
     out_buffer                      
     pop rsi
     pop rax
-    mov rdi, buffer                 ;  rdi = buffer start
+    mov rdi, buffer             ;  rdi = buffer start
 
-    cmp rcx, BUF_LEN                ; if (required space <= buf_len)
-    jle %%buf_ok                    ;  return;
+    cmp rcx, BUF_LEN            ; if (required space <= buf_len)
+    jle %%buf_ok                ;  return;
 
-%%big_str:                          ; else
-    push rax                        ;  syscall; (printf str separately)
+%%big_str:                      ; else
+    push rax                    ;  syscall; (printf str separately)
 
-    mov rax, 1                      ; write
-    mov rdx, rcx                    ; rdx = buffer len
-    mov rdi, 1                      ; stdout
-    safe_syscall                    ; rsi = string ptr 
+    mov rax, 1                  ; write
+    mov rdx, rcx                ; rdx = buffer len
+    mov rdi, 1                  ; stdout
+    safe_syscall                ; rsi = string ptr 
 
     mov rdi, buffer
     pop rax
@@ -153,7 +153,7 @@ global asm_exit
 ;----------------------------------------------------
 printf_str:
     mov rsi, [rbp]
-    count_strlen rsi             ; rcx = strlen
+    count_strlen rsi            ; rcx = strlen
     check_buf rcx
 
 .next_step:
@@ -353,7 +353,7 @@ printf_hex:
     and edx, 0b1111              ; edx = next 4 bits
     shl eax, 4                   ; delete 4 bits from eax
     mov dl, byte [hex_table + rdx]
-    mov [rdi], dl               ; buffer[rdi++] = *(hex_table + edx)
+    mov [rdi], dl                ; buffer[rdi++] = *(hex_table + edx)
     inc rdi
     loop .next_step
 
@@ -363,15 +363,16 @@ printf_hex:
 ;----------------------------------------------------
 ; Main printf function. Parces format and output string.
 ;
-; Input: rax - format ptr,
-;        stack - other arguments.
+; Input: arguments in stack.
 ;
 ; Destr: rax, rbx, rcx, rdx, rdi, rsi, rbp
 ;----------------------------------------------------
 printf_main:
-    mov rbp, rsp
-    add rbp, 8                  ; skip ret ptr printf_main func
-;                               ;   rbp point to 1st arg in stack
+    mov rbp, rsp                ; skip ret ptr printf_main func and saved registers (rbx, rbp)
+    add rbp, 8*3                ;  rbp point to 1st arg in stack
+
+    mov rax, [rbp]              ; rax = format
+    add rbp, 8                  ; rbp = 2nd arg
 
     mov rdi, buffer
 
@@ -486,16 +487,22 @@ printf_main:
 asm_printf:
     pop r10                     ; save return address
 
-    push r9 
+    push r9                     ; push params on stack
     push r8 
     push rcx 
     push rdx 
     push rsi
+    push rdi
 
-    mov rax, rdi                ; rax = format
+    push rbx                    ; save regs
+    push rbp
 
     call printf_main
 
+    pop rbx
+    pop rbp
+
+    pop rdi
     pop rsi 
     pop rdx 
     pop rcx 
@@ -504,11 +511,5 @@ asm_printf:
 
     push r10                    ; return return address :)
     ret
-
-;----------------------------------------------------
-
-asm_exit:
-    mov rax, 60
-    syscall 
 
 ;----------------------------------------------------
