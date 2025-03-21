@@ -1,6 +1,3 @@
-; TODO stack frame only bp (bp + di*8 = args) (bp - si = buf)
-; TODO jump table with global labels
-
 section .rodata
 
 ; WARNING! 
@@ -8,11 +5,20 @@ section .rodata
 ; Buffer length must be divisible by 8, because buffer stored on stack
 BUF_LEN equ 32
 
+; 3d because skip 2 saved regs on stack and return addr
+BYTES_BETWEEN_ARGS_AND_STACK equ 3d * 8d 
+
+; (rbp - FIRST_ARG_OFFSET) = first arg on stack ptr      
+FIRST_ARG_OFFSET equ 6d * 8d 
+
+; (rbp - BUFFER_BEGIN_OFFSET) = buffer begin ptr
+BUFFER_BEGIN_OFFSET equ FIRST_ARG_OFFSET + BYTES_BETWEEN_ARGS_AND_STACK + BUF_LEN
+
 LEN_DEC_INT32  equ 11d              ; 10 bytes of ascii number + 1 byte sign
 LEN_BIN_UINT32 equ 32d              ; 32 bytes of ascii number
 LEN_OCT_UINT32 equ 11d              ; 11 bytes of ascii number
 LEN_HEX_UINT32 equ 8d               ; 8 bytes  of ascii number
-LEN_CHAR       equ 1d
+LEN_CHAR       equ 1d               ; 1 byte   of ascii char
 
 hex_table db "0123456789abcdef"
 
@@ -25,9 +31,7 @@ jump_table:
     dq                     printf_bin                   ; 'b'
     dq                     printf_main.printf_c         ; 'c'
     dq                     printf_dec                   ; 'd'
-    dq                     printf_main.printf_other     ; unused 'e'
-    dq                     printf_main.printf_other     ; unused 'f'
-    times 'n' - 'g' + 1 dq printf_main.printf_other     ; unused 'g' - 'n'
+    times 'n' - 'e' + 1 dq printf_main.printf_other     ; unused 'e' - 'n'
     dq                     printf_oct                   ; 'o'
     times 'r' - 'p' + 1 dq printf_main.printf_other     ; unused 'p' - 'r'
     dq                     printf_str                   ; 's'
@@ -40,18 +44,46 @@ section .text
 global asm_printf
 
 ;----------------------------------------------------
-; Saves regs rcx and r11 before syscall.
-;----------------------------------------------------
-%macro safe_syscall 0
-    push rcx 
-    push r11
-    
-    syscall
 
-    pop r11 
-    pop rcx
+%macro shift_param 0
+    inc rsi
 %endmacro
 
+;----------------------------------------------------
+; Input:  rax       - format ptr with offset to current byte,
+;         rbp + rdi - buffer ptr with offset.
+;
+; Destr:  rcx, rdx.
+;
+; Output: rbp + rdi - new buffer offset.
+;----------------------------------------------------
+%macro printf_from_format 0
+    check_buf LEN_CHAR
+
+    mov dl, [rax]
+    mov [rbp + rdi], dl
+    inc rdi
+
+%endmacro
+
+;----------------------------------------------------
+; Input:  rbp + rsi * 8d - stack ptr to currect arg,
+;         rbp + rdi      - buffer ptr with offset.
+;
+; Destr:  rcx
+;
+; Output: rbp + rsi * 8d - next arg,
+;         rbp + rdi      - new buffer offset.
+;----------------------------------------------------
+%macro printf_char 0
+    check_buf LEN_CHAR
+
+    mov dl, [rbp + rsi * 8]
+    mov [rbp + rdi], dl
+    inc rdi
+
+    shift_param
+%endmacro
 
 ;----------------------------------------------------
 ; Input:  %1 - string ptr.
@@ -75,36 +107,38 @@ global asm_printf
 %endmacro
 
 ;----------------------------------------------------
-; Input: rdi - curr buffer ptr (with offset)
+; Input: rbp + rdi - curr buffer ptr (with offset)
+;
+; Destr: rax, rdx, rdi, rsi 
 ;----------------------------------------------------
 %macro out_buffer 0
-    mov rax, 1                      ; write
-    mov rdx, rdi                    ; rdi - curr buffer ptr (with offset)
-    sub rdx, r11                    ; rdx = buffer len
-    cmp rdx, 0
-    je %%end
-    mov rdi, 1                      ; stdout
-    mov rsi, r11         
+    mov rax, 1                          ; write
+    
+    mov rdx, BUFFER_BEGIN_OFFSET
+    add rdx, rdi                        ; rdx = buf size
+
+    mov rdi, 1                          ; stdout
+
+    mov rsi, rbp
+    sub rsi, BUFFER_BEGIN_OFFSET
+
     safe_syscall
-%%end:
 %endmacro
 
 ;----------------------------------------------------
 ; Input:  1st arg - required space
-;         rsi - string ptr (if macro called from printf_str)
+;         rbp + rsi * 8d - string ptr (if macro called from printf_str)
 ;
-; Output: rdi - new buffer ptr
+; Output: rbp + rdi - new buffer ptr
 ;
 ; Destr:  rcx, rdx
 ;----------------------------------------------------
 %macro check_buf 1
-    mov rcx, %1
+    mov rdx, rdi                    ; rdx = free space
+    neg rdx
+    sub rdx, FIRST_ARG_OFFSET + BYTES_BETWEEN_ARGS_AND_STACK  
 
-    mov rdx, r11                    ; rdi - curr buffer ptr (with offset)   
-    add rdx, BUF_LEN 
-    sub rdx, rdi                    ; rdx = free space
-
-    cmp rdx, rcx                    ; if (free space >= required space)
+    cmp rdx, %1                     ; if (free space >= required space)
     jge %%buf_ok                    ;  return;
 
     push rax                        ; else
@@ -112,310 +146,121 @@ global asm_printf
     out_buffer                      
     pop rsi
     pop rax
-    mov rdi, r11                    ;  rdi = buffer start
-
-    cmp rcx, BUF_LEN                ; if (required space <= buf_len)
-    jle %%buf_ok                    ;  return;
-
-%%big_str:                          ; else
-    push rax                        ;  syscall; (printf str separately)
-    push rdi
-
-    mov rax, 1                      ; write
-    mov rdx, rcx                    ; rdx = requiered space
-    mov rdi, 1                      ; stdout
-    safe_syscall                    ; rsi = string ptr 
-
-    pop rdi
-    pop rax
-
-    jmp printf_str.end
+    mov rdi, BUFFER_BEGIN_OFFSET    ; rdi = buffer start
+    neg rdi
 
 %%buf_ok:
 %endmacro
 
 ;----------------------------------------------------
-; Input:  rax - format ptr with offset to current byte,
-;         rdi - buffer ptr with offset.
-;
-; Destr:  rcx, rdx.
-;
-; Output: rdi - new buffer offset.
-;----------------------------------------------------
-%macro printf_from_format 0
-    check_buf LEN_CHAR
 
+%macro check_big_str 1
+    cmp %1, BUF_LEN                 ; if (required space <= buf_len)
+    jle %%end                       ;  return;
+
+%%big_str:                          ; else syscall; (printf str separately)
     push rax
-    mov rax, [rax]
-    stosb
+    push rsi                        
+    out_buffer                      ; printf (buffer)
+    pop rsi
+    push rsi
+
+    mov rax, 1                      ; write
+    mov rdx, %1                     ; rdx = requiered space
+    mov rdi, 1                      ; stdout
+                                    
+    neg rsi                         ; rsi = string ptr  (rsi = [rbp + rsi * 8d])
+    shl rsi, 3                      ; ^
+    neg rsi                         ; |
+    add rsi, rbp                    ; |
+    mov rsi, [rsi]                  ; |
+
+    safe_syscall                    
+
+    pop rsi
     pop rax
+    mov rdi, BUFFER_BEGIN_OFFSET
+    neg rdi                         ; rdi = buffer start
+
+    shift_param
+    jmp printf_main.parce
+%%end:
 %endmacro
 
 ;----------------------------------------------------
-; Input:  rbp - stack ptr to currect arg,
-;         rdi - buffer ptr with offset.
-;
-; Destr:  rcx, rdx, rsi.
-;
-; Output: rdi - new buffer offset.
+; Saves regs rcx and r11 before syscall.
 ;----------------------------------------------------
-%macro printf_char 0
-    check_buf LEN_CHAR
+%macro safe_syscall 0
+    push rcx 
+    push r11
+    
+    syscall
 
-    mov rsi, rbp
-    movsb
+    pop r11 
+    pop rcx
 %endmacro
 
 ;----------------------------------------------------
-; Input:  rbp - stack ptr to currect arg,
-;         rdi - buffer ptr with offset.
+; Push arguments passed via registers on stack,
+;  sets start of stack frame to rbp,
+;   calls main printf function.
 ;
-; Destr:  rcx, rdx, rsi.
+; Input: rdi - 1st arg (format),
+;        rsi, rdx, rcx, r8, r9, stack - other arguments.
 ;
-; Output: rdi - new buffer offset.
+; Destr: r10 - return address.
+;        r11 - old rbp
 ;----------------------------------------------------
-printf_str:
-    mov rsi, [rbp]
-    count_strlen rsi                ; rcx = strlen
-    check_buf rcx
+asm_printf:
+    mov r11, rbp                    ; save rbp
+    pop r10                         ; save return address
 
-.next_step:
-    cmp [rsi], byte 0
-    je .end
-    movsb
-    jmp .next_step
+    mov rbp, rsp                    ; stack frame begin
 
-.end:
-    jmp printf_main.shift_param
-
-;----------------------------------------------------
-; Input:  eax - int32_t,
-;         rdi - buffer ptr with offset.
-;
-; Destr:  eax,
-;         rcx - digits counter + check_buf, 
-;         ebx - radix,  
-;         rdx - mod + check_buf.
-;
-; Output: rdi - new buffer offset.
-;----------------------------------------------------
-printf_dec:
-    push rax
-    mov eax, [rbp]
-
-    check_buf LEN_DEC_INT32
-    xor rcx, rcx
-
-    cmp eax, 0
-    jl .is_neg
-    jmp .next_step
-
-.is_neg:
-    neg eax
-    mov byte [rdi], '-'
-    inc rdi
-
-.next_step:                         ; push digits on stack
-    mov ebx, 10
-    xor edx, edx
-    div ebx                         ; eax = edx:eax / ebx
-;                                   ; edx = edx:eax % ebx
+    push r9                         ; push params on stack
+    push r8 
+    push rcx 
     push rdx
-    inc rcx
-    cmp eax, 0
-    je .print_step
-    jmp .next_step
+    push rsi
+    push rdi
 
-.print_step:                        ; pop digits and move to buffer
-    cmp rcx, 0
-    je .end
-    pop rax
-    add eax, '0'
-    stosb
-    dec rcx
-    jmp .print_step
+    push rbx                        ; save rbx
+    push r11                        ; save rbp (r11 = rbp)
 
-.end:
-    pop rax
-    jmp printf_main.shift_param
+    call printf_main
 
-;----------------------------------------------------
-; Input:  eax - uint32_t,
-;         rdi - buffer ptr with offset.
-;
-; Destr:  eax,
-;         rcx - digits counter + check_buf,
-;         rdx - digit ascii code + check_buf.
+    pop rbp
+    pop rbx
 
-; Output: rdi - new buffer offset.
-;----------------------------------------------------
-printf_bin:
-    push rax
-    mov eax, [rbp]
+    pop rdi
+    pop rsi 
+    pop rdx 
+    pop rcx 
+    pop r8 
+    pop r9
 
-    check_buf LEN_BIN_UINT32
-    mov rcx, LEN_BIN_UINT32
-    xor rdx, rdx
-
-.skip_zeros:
-    shl eax, 1                      ; if (most significant bit eax = 1) cf = 1
-;                                   ;  else cf = 0
-    jc .buffer_write                ; if (cf == 1) jmp
-    loop .skip_zeros
-
-    mov byte [rdi], '0'             ; if (all bits == 0) buffer[rdi++] = '0'
-    inc rdi
+    push r10                        ; return return address :)
     ret
-
-.buffer_write:
-    adc dl, 0                       ; dl = cf
-    add dl, '0'                     ; dl = '0' or dl = '1'
-    mov [rdi], dl                   ; buffer[rdi++] = dl
-    inc rdi
-    loop .next_step
-    ret
-
-.next_step:
-    xor dl, dl
-    shl eax, 1
-    adc dl, 0
-    add dl, '0'
-    mov [rdi], dl
-    inc rdi
-    loop .next_step
-
-.end:
-    pop rax
-    jmp printf_main.shift_param
-
-;----------------------------------------------------
-; Input:  eax - uint32_t,
-;         rdi - buffer ptr with offset.
-;
-; Destr:  eax,
-;         rcx - digits counter + check buf,
-;         rdx - digit ascii code + check_buf.
-;
-; Output: rdi - new buffer offset.
-;----------------------------------------------------
-printf_oct:
-    push rax
-    mov eax, [rbp]
-
-    check_buf LEN_OCT_UINT32
-    mov rcx, LEN_OCT_UINT32
-
-.first_oct_digit:                   ; process first 2 bits apart, because 32 % 3 = 2
-    mov edx, eax                    ; EXAMPLE: edx = 0b1110...0000
-    rol edx, 2                      ; edx = 0b10...000011
-    and dl, 0b11                    ; edx = 0b00...000011 (first 2 bits of eax in dl)
-    shl eax, 2                      ; delete first 2 bits from eax
-    cmp dl, 0                       ; if (dl == 0) not print this symb
-    jne .buffer_write
-    loop .skip_zeros
-
-.skip_zeros:
-    mov edx, eax
-    rol edx, 3
-    and dl, 0b111                   ; dl = next 3 bits
-    shl eax, 3                      ; delete 3 bits from eax
-    cmp dl, 0
-    jne .buffer_write
-    loop .skip_zeros
-
-    mov byte [rdi], '0'             ; if (all bits == 0) buffer[rdi++] = '0'
-    inc rdi
-    ret
-
-.buffer_write:
-    add edx, '0'
-    mov [rdi], dl
-    inc rdi
-    loop .next_step
-    ret
-
-.next_step:
-    mov edx, eax
-    rol edx, 3
-    and dl, 0b111                   ; dl = next 3 bits
-    shl eax, 3                      ; delete 3 bits from eax
-    add dl, '0'                     ; dl = ascii of digit
-    mov [rdi], dl                   ; buffer[rdi++] = dl
-    inc rdi
-    loop .next_step
-
-.end:
-    pop rax
-    jmp printf_main.shift_param
-
-;----------------------------------------------------
-; Input:  eax - uint32_t,
-;         rdi - buffer ptr with offset.
-;
-; Destr:  eax,
-;         rcx - digits counter + check_buf,
-;         rdx - digit ascii code + check_buf.
-;
-; Output: rdi - new buffer offset.
-;----------------------------------------------------
-printf_hex:
-    push rax
-    mov eax, [rbp]
-
-    check_buf LEN_HEX_UINT32
-    mov rcx, LEN_HEX_UINT32
-
-.skip_zeros:
-    mov edx, eax 
-    rol edx, 4                      
-    and edx, 0b1111                 ; edx = next 4 bits
-    shl eax, 4                      ; delete 4 bits from eax
-    cmp edx, 0                      ; if (edx == 0) not print this symb
-    jne .buffer_write
-    loop .skip_zeros
-
-    mov byte [rdi], '0'             ; if (all bits == 0) buffer[rdi++] = '0'
-    inc rdi
-    ret
-
-.buffer_write:
-    mov dl, byte [hex_table + rdx]
-    mov [rdi], dl
-    inc rdi
-    loop .next_step
-    ret
-
-.next_step:
-    mov edx, eax
-    rol edx, 4                  
-    and edx, 0b1111                 ; edx = next 4 bits
-    shl eax, 4                      ; delete 4 bits from eax
-    mov dl, byte [hex_table + rdx]
-    mov [rdi], dl                   ; buffer[rdi++] = *(hex_table + edx)
-    inc rdi
-    loop .next_step
-
-.end:
-    pop rax
-    jmp printf_main.shift_param
 
 ;----------------------------------------------------
 ; Main printf function. Parces format and printf string.
 ;
-; Input: arguments in stack.
+; Input: rbp - stack frame begin,
+;        arguments on stack.
 ;
-; Destr: rax, rbx, rcx, rdx, rdi, rsi, rbp
+; Destr: rax, rbx, rcx, rdx, rdi, rsi
 ;----------------------------------------------------
 printf_main:
-    mov rbp, rsp                    ; skip ret ptr printf_main func and saved registers (rbx, rbp)
-    add rbp, 8*4                    ;  rbp point to 1st arg in stack
+    mov rsi, FIRST_ARG_OFFSET / 8d  
+    neg rsi                         ; set (rbp + rsp * 8d) to first argument on stack
 
-    sub rsp, BUF_LEN
-    mov rdi, rsp
-    mov r11, rdi                    ; save begin of buffer in r11
+    sub rsp, BUF_LEN                ; allocate space for buffer
 
-    mov rax, [rbp]                  ; rax = format
-    add rbp, 8                      ; rbp = 2nd arg
+    mov rdi, BUFFER_BEGIN_OFFSET    ; set (rbp + rdi) to buffer begin
+    neg rdi                         ; 
+
+    mov rax, [rbp + rsi * 8]        ; rax = format
+    inc rsi                         ; (rbp + rsi * 8d) = 2nd arg
 
     dec rax
 .parce:                             ; parce format string
@@ -437,51 +282,19 @@ printf_main:
     jl .printf_other
     cmp [rax], byte 'x'
     jg .printf_other
-    movzx rbx, byte [rax]
-    sub rbx, 'a'
+
+    movzx rbx, byte [rax] 
+    sub rbx, 'a'  
     jmp [jump_table + rbx * 8h]
-    
-.printf_c:
-    printf_char
-    jmp .shift_param
-
-; .printf_s:
-;     call printf_str
-;     jmp .shift_param
-
-; .printf_d:
-;     push rax
-;     mov eax, [rbp]
-;     call printf_dec
-;     pop rax
-;     jmp .shift_param
-
-; .printf_b:
-    ; push rax
-    ; mov eax, [rbp]
-    ; call printf_bin
-    ; pop rax
-    ; jmp .shift_param
-
-; .printf_o:
-;     push rax
-;     mov eax, [rbp]
-;     call printf_oct
-;     pop rax
-;     jmp .shift_param
-
-; .printf_x:
-;     push rax
-;     mov eax, [rbp]
-;     call printf_hex
-;     pop rax
-;     jmp .shift_param
-
 
 .printf_other:
     cmp [rax], byte '%'
     jne .printf_error
     printf_from_format
+    jmp .parce
+
+.printf_c:
+    printf_char
     jmp .parce
 
 .printf_error:
@@ -493,52 +306,254 @@ printf_main:
     add rsp, BUF_LEN
     ret
 
-.shift_param:
-    add rbp, 8
-    jmp .parce
-
 .end_printf:
+    out_buffer      
     add rsp, BUF_LEN
-    out_buffer         
     ret
 
 ;----------------------------------------------------
-; Push arguments passed via registers on stack 
-;   and calls main printf function.
+; Input:  rbp - stack ptr to currect arg,
+;         rdi - buffer ptr with offset.
 ;
-; Input: rdi - 1st arg (format),
-;        rsi, rdx, rcx, r8, r9, stack - other arguments.
+; Destr:  rcx, rdx, rsi.
 ;
-; Destr: r10 - return address.
+; Output: rdi - new buffer offset.
 ;----------------------------------------------------
-asm_printf:
-    pop r10                         ; save return address
+printf_str:
+    count_strlen [rbp + rsi * 8d]    ; rcx = strlen
+    check_big_str rcx
+    check_buf rcx
 
-    push r9                         ; push params on stack
-    push r8 
-    push rcx 
-    push rdx 
-    push rsi
-    push rdi
+    mov rcx, [rbp + rsi * 8d]
 
-    push rbx                        ; save regs
-    push rbp
-    push r11
+.next_step:
+    cmp [rcx], byte 0
+    je .end
+    mov dl, [rcx]
+    mov [rbp + rdi], dl
+    inc rcx
+    inc rdi
+    jmp .next_step
 
-    call printf_main
+.end:
+    shift_param
+    jmp printf_main.parce
 
-    pop r11
-    pop rbp
-    pop rbx
+;----------------------------------------------------
+; Input:  eax - int32_t,
+;         rdi - buffer ptr with offset.
+;
+; Destr:  eax,
+;         rcx - digits counter + check_buf, 
+;         ebx - radix,  
+;         rdx - mod + check_buf.
+;
+; Output: rdi - new buffer offset.
+;----------------------------------------------------
+printf_dec:
+    check_buf LEN_DEC_INT32
+    xor rcx, rcx
 
-    pop rdi
-    pop rsi 
-    pop rdx 
-    pop rcx 
-    pop r8 
-    pop r9
+    push rax
+    mov eax, [rbp + rsi * 8d]
 
-    push r10                        ; return return address :)
-    ret
+    cmp eax, 0
+    jl .is_neg
+    jmp .next_step
+
+.is_neg:
+    neg eax
+    mov byte [rbp + rdi], '-'
+    inc rdi
+
+.next_step:                         ; push digits on stack
+    mov ebx, 10
+    xor edx, edx
+    div ebx                         ; eax = edx:eax / ebx
+;                                   ; edx = edx:eax % ebx
+    push rdx
+    inc rcx
+    cmp eax, 0
+    je .print_step
+    jmp .next_step
+
+.print_step:                        ; pop digits and move to buffer
+    cmp rcx, 0
+    je .end
+    pop rax
+    add eax, '0'
+    mov [rbp + rdi], al
+    inc rdi
+    dec rcx
+    jmp .print_step
+
+.end:
+    pop rax
+    shift_param                      ; inc rsi
+    jmp printf_main.parce
+
+;----------------------------------------------------
+; Input:  eax - uint32_t,
+;         rdi - buffer ptr with offset.
+;
+; Destr:  eax,
+;         rcx - digits counter + check_buf,
+;         rdx - digit ascii code + check_buf.
+
+; Output: rdi - new buffer offset.
+;----------------------------------------------------
+printf_bin:
+    check_buf LEN_BIN_UINT32
+    mov rcx, LEN_BIN_UINT32
+
+    push rax
+    mov eax, [rbp + rsi * 8d]
+
+    xor rdx, rdx
+
+.skip_zeros:
+    shl eax, 1                      ; if (most significant bit eax = 1) cf = 1
+;                                   ;  else cf = 0
+    jc .buffer_write                ; if (cf == 1) jmp
+    loop .skip_zeros
+
+    mov byte [rbp + rdi], '0'       ; if (all bits == 0) buffer[rdi++] = '0'
+    inc rdi
+    jmp .end
+
+.buffer_write:
+    adc dl, 0                       ; dl = cf
+    add dl, '0'                     ; dl = '0' or dl = '1'
+    mov [rbp + rdi], dl             ; buffer[rdi++] = dl
+    inc rdi
+    loop .next_step
+    jmp .end
+
+.next_step:
+    xor dl, dl
+    shl eax, 1
+    adc dl, 0
+    add dl, '0'
+    mov [rbp + rdi], dl
+    inc rdi
+    loop .next_step
+
+.end:
+    pop rax
+    shift_param
+    jmp printf_main.parce
+
+;----------------------------------------------------
+; Input:  eax - uint32_t,
+;         rdi - buffer ptr with offset.
+;
+; Destr:  eax,
+;         rcx - digits counter + check buf,
+;         rdx - digit ascii code + check_buf.
+;
+; Output: rdi - new buffer offset.
+;----------------------------------------------------
+printf_oct:
+    check_buf LEN_OCT_UINT32
+    mov rcx, LEN_OCT_UINT32
+
+    push rax
+    mov eax, [rbp + rsi * 8d]
+
+.first_oct_digit:                   ; process first 2 bits apart, because 32 % 3 = 2
+    mov edx, eax                    ; EXAMPLE: edx = 0b1110...0000
+    rol edx, 2                      ; edx = 0b10...000011
+    and dl, 0b11                    ; edx = 0b00...000011 (first 2 bits of eax in dl)
+    shl eax, 2                      ; delete first 2 bits from eax
+    cmp dl, 0                       ; if (dl == 0) not print this symb
+    jne .buffer_write
+    loop .skip_zeros
+
+.skip_zeros:
+    mov edx, eax
+    rol edx, 3
+    and dl, 0b111                   ; dl = next 3 bits
+    shl eax, 3                      ; delete 3 bits from eax
+    cmp dl, 0
+    jne .buffer_write
+    loop .skip_zeros
+
+    mov byte [rbp + rdi], '0'       ; if (all bits == 0) buffer[rdi++] = '0'
+    inc rdi
+    jmp .end
+
+.buffer_write:
+    add edx, '0'
+    mov [rbp + rdi], dl
+    inc rdi
+    loop .next_step
+    jmp .end
+
+.next_step:
+    mov edx, eax
+    rol edx, 3
+    and dl, 0b111                   ; dl = next 3 bits
+    shl eax, 3                      ; delete 3 bits from eax
+    add dl, '0'                     ; dl = ascii of digit
+    mov [rbp + rdi], dl             ; buffer[rdi++] = dl
+    inc rdi
+    loop .next_step
+
+.end:
+    pop rax
+    shift_param
+    jmp printf_main.parce
+
+;----------------------------------------------------
+; Input:  eax - uint32_t,
+;         rdi - buffer ptr with offset.
+;
+; Destr:  eax,
+;         rcx - digits counter + check_buf,
+;         rdx - digit ascii code + check_buf.
+;
+; Output: rdi - new buffer offset.
+;----------------------------------------------------
+printf_hex:
+    check_buf LEN_HEX_UINT32
+    mov rcx, LEN_HEX_UINT32
+
+    push rax
+    mov eax, [rbp + rsi * 8d]
+
+.skip_zeros:
+    mov edx, eax 
+    rol edx, 4                      
+    and edx, 0b1111                 ; edx = next 4 bits
+    shl eax, 4                      ; delete 4 bits from eax
+    cmp edx, 0                      ; if (edx == 0) not print this symb
+    jne .buffer_write
+    loop .skip_zeros
+
+    mov byte [rbp + rdi], '0'       ; if (all bits == 0) buffer[rdi++] = '0'
+    inc rdi
+    jmp .end
+
+.buffer_write:
+    mov dl, byte [hex_table + rdx]
+    mov [rbp + rdi], dl
+    inc rdi
+    loop .next_step
+    jmp .end
+
+.next_step:
+    mov edx, eax
+    rol edx, 4                  
+    and edx, 0b1111                 ; edx = next 4 bits
+    shl eax, 4                      ; delete 4 bits from eax
+    mov dl, byte [hex_table + rdx]
+    mov [rbp + rdi], dl             ; buffer[rdi++] = *(hex_table + edx)
+    inc rdi
+    loop .next_step
+
+.end:
+    pop rax
+    shift_param
+    jmp printf_main.parce
 
 ;----------------------------------------------------
